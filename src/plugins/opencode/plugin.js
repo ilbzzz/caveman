@@ -5,9 +5,9 @@
 // - Parses user messages for /caveman commands and natural-language toggles
 // - Injects per-turn reinforcement into the system prompt
 //
-// Bun ESM module; loads the existing security-hardened helpers from
-// caveman-config.js via createRequire so the symlink-safe flag-write code
-// lives in one place.
+// Bun ESM module; loads the existing security-hardened helpers directly
+// (mirrored from caveman-config.js) to avoid dynamic code evaluation
+// (new Function/require) of potentially untrusted config files on disk.
 //
 // Layout once installed:
 //   ~/.config/opencode/plugins/caveman/
@@ -33,43 +33,133 @@
 // https://github.com/JuliusBrussee/caveman/issues/418
 // https://github.com/JuliusBrussee/caveman/issues/421
 
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { existsSync, unlinkSync, readFileSync } from 'node:fs';
+import fs, { existsSync, unlinkSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-// When installed: caveman-config.cjs sits next to plugin.js (copied by
-// bin/install.js, renamed to .cjs because this directory's package.json
-// declares "type": "module" — bare .js would be loaded as ESM). When loaded
-// from the source tree (tests, dev): fall back to the canonical
-// src/hooks/caveman-config.js, which lives in a directory whose own
-// package.json pins "type": "commonjs". One source of truth either way.
-//
-// Loaded by evaluating the file as CommonJS by hand, NOT via the module
-// loader: opencode runs plugins inside a compiled Bun binary where
-// require() of on-disk files is rejected ("require() async module is
-// unsupported") and await import() of a CJS file yields an empty namespace —
-// both silently break the plugin (#418 follow-up). createRequire() still
-// resolves node BUILT-INS fine in the compiled binary, which is all
-// caveman-config needs (fs/path/os).
-function loadConfig() {
-  const installed = join(here, 'caveman-config.cjs');
-  const dev = join(here, '..', '..', 'hooks', 'caveman-config.js');
-  const target = existsSync(installed) ? installed : dev;
-  const code = readFileSync(target, 'utf8').replace(/^#![^\n]*\n/, '');
-  const mod = { exports: {} };
-  new Function('module', 'exports', 'require', '__dirname', '__filename', code)(
-    mod, mod.exports, createRequire(import.meta.url), dirname(target), target
-  );
-  return mod.exports;
-}
-const config = loadConfig();
+const VALID_MODES = [
+  'off', 'lite', 'full', 'ultra',
+  'wenyan-lite', 'wenyan', 'wenyan-full', 'wenyan-ultra',
+  'commit', 'review', 'compress'
+];
 
-const { getDefaultMode, safeWriteFlag, readFlag, VALID_MODES } = config;
+function getConfigDir() {
+  if (process.env.XDG_CONFIG_HOME) return path.join(process.env.XDG_CONFIG_HOME, 'caveman');
+  if (process.platform === 'win32') {
+    return path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'caveman');
+  }
+  return path.join(os.homedir(), '.config', 'caveman');
+}
+
+function readModeFromConfigFile(configPath) {
+  try {
+    const raw = fs.readFileSync(configPath, 'utf8');
+    const config = JSON.parse(raw);
+    if (config && config.defaultMode &&
+        VALID_MODES.includes(String(config.defaultMode).toLowerCase())) {
+      return String(config.defaultMode).toLowerCase();
+    }
+  } catch (e) {}
+  return null;
+}
+
+function findRepoConfigPath(start) {
+  try {
+    let dir = path.resolve(start || process.cwd());
+    const candidates = ['.caveman/config.json', '.caveman.json'];
+    for (let i = 0; i < 64; i++) {
+      for (const rel of candidates) {
+        const p = path.join(dir, rel);
+        try {
+          const st = fs.lstatSync(p);
+          if (st.isSymbolicLink() || !st.isFile()) continue;
+          return p;
+        } catch (e) {}
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) return null;
+      dir = parent;
+    }
+  } catch (e) {}
+  return null;
+}
+
+function getDefaultMode() {
+  const envMode = process.env.CAVEMAN_DEFAULT_MODE;
+  if (envMode && VALID_MODES.includes(envMode.toLowerCase())) return envMode.toLowerCase();
+  const repoConfigPath = findRepoConfigPath(process.cwd());
+  if (repoConfigPath) {
+    const repoMode = readModeFromConfigFile(repoConfigPath);
+    if (repoMode) return repoMode;
+  }
+  const userMode = readModeFromConfigFile(path.join(getConfigDir(), 'config.json'));
+  if (userMode) return userMode;
+  return 'full';
+}
+
+function safeWriteFlag(flagPath, content) {
+  try {
+    const flagDir = path.dirname(flagPath);
+    fs.mkdirSync(flagDir, { recursive: true });
+    let realFlagDir;
+    try {
+      const lstat = fs.lstatSync(flagDir);
+      if (lstat.isSymbolicLink()) {
+        realFlagDir = fs.realpathSync(flagDir);
+        const realStat = fs.statSync(realFlagDir);
+        if (!realStat.isDirectory()) return;
+        if (typeof process.getuid === 'function') {
+          if (realStat.uid !== process.getuid()) return;
+        } else {
+          const home = os.homedir();
+          const normalizedReal = path.resolve(realFlagDir).toLowerCase();
+          const normalizedHome = path.resolve(home).toLowerCase();
+          if (!normalizedReal.startsWith(normalizedHome + path.sep) &&
+              normalizedReal !== normalizedHome) return;
+        }
+      } else {
+        realFlagDir = flagDir;
+      }
+    } catch (e) { return; }
+
+    const realFlagPath = path.join(realFlagDir, path.basename(flagPath));
+    try {
+      if (fs.lstatSync(realFlagPath).isSymbolicLink()) return;
+    } catch (e) { if (e.code !== 'ENOENT') return; }
+
+    const tempPath = path.join(realFlagDir, `.caveman-active.${process.pid}.${Date.now()}`);
+    const O_NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
+    const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | O_NOFOLLOW;
+    let fd;
+    try {
+      fd = fs.openSync(tempPath, flags, 0o600);
+      fs.writeSync(fd, String(content));
+      try { fs.fchmodSync(fd, 0o600); } catch (e) {}
+    } finally { if (fd !== undefined) fs.closeSync(fd); }
+    fs.renameSync(tempPath, realFlagPath);
+  } catch (e) {}
+}
+
+function readFlag(flagPath) {
+  try {
+    const st = fs.lstatSync(flagPath);
+    if (st.isSymbolicLink() || !st.isFile() || st.size > 64) return null;
+    const O_NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
+    const flags = fs.constants.O_RDONLY | O_NOFOLLOW;
+    let fd;
+    try {
+      fd = fs.openSync(flagPath, flags);
+      const buf = Buffer.alloc(64);
+      const n = fs.readSync(fd, buf, 0, 64, 0);
+      const raw = buf.slice(0, n).toString('utf8').trim().toLowerCase();
+      return VALID_MODES.includes(raw) ? raw : null;
+    } finally { if (fd !== undefined) fs.closeSync(fd); }
+  } catch (e) { return null; }
+}
 
 // Modes handled by independent skills — not selectable via /caveman <arg>.
 const INDEPENDENT_MODES = new Set(['commit', 'review', 'compress']);
