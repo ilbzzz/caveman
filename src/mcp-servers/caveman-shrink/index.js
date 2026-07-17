@@ -27,6 +27,8 @@
 //   CAVEMAN_SHRINK_DEBUG=1  log compression deltas to stderr
 
 const { spawn } = require('child_process');
+const path = require('path');
+const fs = require('fs');
 const { compressDescriptionsInPlace, compress } = require('./compress');
 
 const args = process.argv.slice(2);
@@ -42,7 +44,22 @@ const fields = (process.env.CAVEMAN_SHRINK_FIELDS || 'description')
 
 const { getSpawnOptions } = require('./spawn-options');
 
-const upstream = spawn(args[0], args.slice(1), getSpawnOptions());
+let command = args[0];
+if (process.platform === 'win32' && !path.isAbsolute(command)) {
+  const pathext = (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';');
+  const paths = (process.env.PATH || '').split(path.delimiter);
+  search: for (const p of paths) {
+    for (const ext of ['', ...pathext]) {
+      const full = path.join(p, command + ext);
+      if (fs.existsSync(full)) {
+        command = full;
+        break search;
+      }
+    }
+  }
+}
+
+const upstream = spawn(command, args.slice(1), getSpawnOptions());
 
 upstream.on('error', err => {
   process.stderr.write(`caveman-shrink: failed to spawn upstream: ${err.message}\n`);

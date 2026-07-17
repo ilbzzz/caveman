@@ -128,17 +128,16 @@ test('compressDescriptionsInPlace skips non-string description fields', () => {
 });
 
 // spawn-options: upstream MCP child process spawn flags.
-// Confirms shell:true on Windows (so npx and other .cmd shims resolve) and
-// shell:false on POSIX.
+// Confirms shell:false on all platforms for security.
 
-test('win32 enables shell so npx and .cmd shims resolve', () => {
+test('win32 keeps shell off for security', () => {
   const opts = getSpawnOptions('win32');
-  assert.equal(opts.shell, true);
+  assert.equal(opts.shell, false);
   assert.equal(opts.windowsHide, true);
   assert.deepEqual(opts.stdio, ['pipe', 'pipe', 'inherit']);
 });
 
-test('linux keeps shell off to avoid argv quoting surprises', () => {
+test('linux keeps shell off', () => {
   const opts = getSpawnOptions('linux');
   assert.equal(opts.shell, false);
   assert.deepEqual(opts.stdio, ['pipe', 'pipe', 'inherit']);
@@ -149,9 +148,9 @@ test('darwin keeps shell off', () => {
   assert.equal(opts.shell, false);
 });
 
-test('defaults to current platform when no arg passed', () => {
+test('defaults to platform-agnostic shell:false', () => {
   const opts = getSpawnOptions();
-  assert.equal(opts.shell, process.platform === 'win32');
+  assert.equal(opts.shell, false);
   assert.equal(opts.windowsHide, true);
   assert.deepEqual(opts.stdio, ['pipe', 'pipe', 'inherit']);
 });
