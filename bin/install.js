@@ -1083,6 +1083,19 @@ async function runInit(ctx) {
   try {
     const tmp = path.join(os.tmpdir(), `caveman-init-${process.pid}.js`);
     await downloadTo(INIT_SCRIPT_URL, tmp);
+
+    const checksums = await loadRemoteHookChecksums();
+    if (checksums) {
+      const want = checksums.get('caveman-init.js');
+      const got = sha256File(tmp);
+      if (!want || want !== got) {
+        try { fs.unlinkSync(tmp); } catch (_) {}
+        warn(`  integrity check failed for caveman-init.js (expected ${want || '<not in manifest>'}, got ${got}) — ` +
+             `refusing to execute a script that doesn't match pinned release ${PINNED_REF}`);
+        return false;
+      }
+    }
+
     const r = child_process.spawnSync(absoluteNodePath(), [tmp, ...args], { stdio: 'inherit' });
     try { fs.unlinkSync(tmp); } catch (_) {}
     return spawnOk(r);
