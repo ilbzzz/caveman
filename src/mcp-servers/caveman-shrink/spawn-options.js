@@ -1,19 +1,19 @@
 // Spawn options for the upstream MCP child process.
 //
 // Windows: spawn('npx', ...) (and any .cmd shim such as 'gemini') hits ENOENT
-// because PATHEXT resolution only happens when child_process spawns through
-// a shell. POSIX systems resolve fine without a shell. Keep shell:false on
-// POSIX to avoid argv quoting surprises.
+// if shell:false is used and the command is not an absolute path or doesn't
+// have the correct extension.
 //
-// Exported standalone so the behavior is unit-testable without re-running
-// the CLI entry point (index.js exits immediately when args are empty).
+// However, shell:true on Windows is vulnerable to OS Command Injection
+// if arguments are not properly sanitized. To stay secure, we use shell:false
+// and recommend Windows users to use the full command name (e.g., 'npx.cmd').
 
 'use strict';
 
 function getSpawnOptions(platform = process.platform) {
   return {
     stdio: ['pipe', 'pipe', 'inherit'],
-    shell: platform === 'win32',
+    shell: false,
     windowsHide: true,
   };
 }
