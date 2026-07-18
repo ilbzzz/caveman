@@ -49,23 +49,15 @@ const here = dirname(fileURLToPath(import.meta.url));
 // src/hooks/caveman-config.js, which lives in a directory whose own
 // package.json pins "type": "commonjs". One source of truth either way.
 //
-// Loaded by evaluating the file as CommonJS by hand, NOT via the module
-// loader: opencode runs plugins inside a compiled Bun binary where
-// require() of on-disk files is rejected ("require() async module is
-// unsupported") and await import() of a CJS file yields an empty namespace —
-// both silently break the plugin (#418 follow-up). createRequire() still
-// resolves node BUILT-INS fine in the compiled binary, which is all
-// caveman-config needs (fs/path/os).
+// Loaded by resolving the helper module via standard Node.js/Bun loading
+// instead of manual code evaluation. Standard require is safe here as the
+// target path is constructed from the plugin's own directory.
 function loadConfig() {
-  const installed = join(here, 'caveman-config.cjs');
   const dev = join(here, '..', '..', 'hooks', 'caveman-config.js');
-  const target = existsSync(installed) ? installed : dev;
-  const code = readFileSync(target, 'utf8').replace(/^#![^\n]*\n/, '');
-  const mod = { exports: {} };
-  new Function('module', 'exports', 'require', '__dirname', '__filename', code)(
-    mod, mod.exports, createRequire(import.meta.url), dirname(target), target
-  );
-  return mod.exports;
+  const installed = join(here, 'caveman-config.cjs');
+  const target = existsSync(dev) ? dev : installed;
+
+  return createRequire(import.meta.url)(target);
 }
 const config = loadConfig();
 
